@@ -272,6 +272,24 @@ return:
   ret void
 }
 
+define void @inc(%memory_t* %memory) {
+  %value   = call i8 @get(%memory_t* %memory)
+  %updated = add i8 %value, 1
+
+  call void @set(%memory_t* %memory, i8 %updated)
+
+  ret void
+}
+
+define void @dec(%memory_t* %memory) {
+  %value   = call i8 @get(%memory_t* %memory)
+  %updated = sub i8 %value, 1
+
+  call void @set(%memory_t* %memory, i8 %updated)
+
+  ret void
+}
+
 @usage_fmt =
   internal constant [22 x i8] c"Usage:\0A\09%s <program>\0A\00"
 
