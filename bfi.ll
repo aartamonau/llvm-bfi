@@ -301,6 +301,102 @@ define void @usage(i8** %argv) {
   unreachable
 }
 
+define void @interpret(i8* %program, i64 %size) {
+prelude:
+  %memory = call %memory_t* @alloc_memory()
+
+  %loops    = alloca i8, i32 2048
+
+  %head_ptr = alloca i32
+  store i32 0, i32* %head_ptr
+
+  br label %loop
+
+loop:
+  %pos = phi i64 [0, %prelude], [%pos_inc, %next_iter]
+
+  %finish = icmp eq i64 %size, %pos
+  br i1 %finish, label %return, label %do_interpret
+
+do_interpret:
+  %op_ptr = getelementptr i8* %program, i64 %pos
+  %op     = load i8* %op_ptr
+
+  br label %try_right
+
+try_right:
+  %right_op = icmp eq i8 %op, 62
+  br i1 %right_op, label %do_right, label %try_left
+
+do_right:
+  call void @right(%memory_t* %memory)
+  br label %next_iter
+
+try_left:
+  %left_op = icmp eq i8 %op, 60
+  br i1 %left_op, label %do_left, label %try_inc
+
+do_left:
+  call void @right(%memory_t* %memory)
+  br label %next_iter
+
+try_inc:
+  %inc_op = icmp eq i8 %op, 43
+  br i1 %inc_op, label %do_inc, label %try_dec
+
+do_inc:
+  call void @inc(%memory_t* %memory)
+  br label %next_iter
+
+try_dec:
+  %dec_op = icmp eq i8 %op, 45
+  br i1 %dec_op, label %do_dec, label %try_print
+
+do_dec:
+  call void @dec(%memory_t* %memory)
+  br label %next_iter
+
+try_print:
+  ; %msg = getelementptr [33 x i8]* @io_error_msg, i8 0, i8 0
+  ; call i32 (i8*, ...)* @printf(i8* %msg)
+
+  %print_op = icmp eq i8 %op, 46
+  br i1 %print_op, label %do_print, label %try_read
+
+do_print:
+  call void @print(%memory_t* %memory)
+  br label %next_iter
+
+try_read:
+  %read_op  = icmp eq i8 %op, 44
+  br i1 %read_op, label %do_read, label %try_loop_start
+
+do_read:
+  call void @read(%memory_t* %memory)
+  br label %next_iter
+
+try_loop_start:
+  %loop_start = icmp eq i8 %op, 91
+  br i1 %loop_start, label %do_loop_start, label %try_loop_end
+
+do_loop_start:
+  br label %next_iter
+
+try_loop_end:
+  %loop_end = icmp eq i8 %op, 93
+  br i1 %loop_end, label %do_loop_end, label %next_iter
+
+do_loop_end:
+  br label %next_iter
+
+next_iter:
+  %pos_inc = add i64 %pos, 1
+  br label %loop
+
+return:
+  ret void
+}
+
 @open_mode = internal constant [1 x i8] c"r"
 @open_error_msg =
   internal constant [27 x i8] c"Failed to open '%s' file.\0A\00"
@@ -352,7 +448,7 @@ read:
   br i1 %io_err3, label %io_error, label %interpret
 
 interpret:
-  %memory = call %memory_t* @alloc_memory()
+  call void @interpret(i8* %program, i64 %size)
 
   ret i32 0
 
