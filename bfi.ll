@@ -26,8 +26,12 @@ declare void @exit(i32)
 declare i32 @fgetc(%FILE*)
 declare i32 @ungetc(i32, %FILE*)
 
+declare %FILE* @fopen(i8*, i8*)
+declare i32 @fseek(%FILE*, i64, i64)
+declare i64 @ftell(%FILE*)
+declare i64 @fread(i8*, i64, i64, %FILE*)
+
 declare i8* @calloc(i64, i64)
-declare void @free(i8*)
 
 declare void @llvm.va_start(i8*)
 declare void @llvm.va_end(i8*)
@@ -268,21 +272,79 @@ return:
   ret void
 }
 
-define i32 @main() {
+@usage_fmt =
+  internal constant [22 x i8] c"Usage:\0A\09%s <program>\0A\00"
+
+define void @usage(i8** %argv) {
+  %name = load i8** %argv
+  %fmt  = getelementptr [22 x i8]* @usage_fmt, i32 0, i32 0
+
+  call void (i8*, ...)* @fatal(i8* %fmt, i8* %name)
+  unreachable
+}
+
+@open_mode = internal constant [1 x i8] c"r"
+@open_error_msg =
+  internal constant [27 x i8] c"Failed to open '%s' file.\0A\00"
+@io_error_msg =
+  internal constant [33 x i8] c"Unrecoverable IO error occured.\0A\00"
+@too_big_msg =
+  internal constant [21 x i8] c"Program is too big.\0A\00"
+
+define i32 @main(i32 %argc, i8** %argv) {
+  %program = alloca i8, i32 4096
+
+  %to_usage = icmp eq i32 %argc, 2
+  br i1 %to_usage, label %open, label %usage
+
+open:
+  %path_ptr = getelementptr i8** %argv, i32 1
+  %path     = load i8** %path_ptr
+
+  %mode = getelementptr [1 x i8]* @open_mode, i8 0, i8 0
+  %file = call %FILE* @fopen(i8* %path, i8* %mode)
+
+  %open_failed = icmp eq %FILE* %file, null
+  br i1 %open_failed, label %open_error, label %do_seek
+
+do_seek:
+  ; fseek(file, 0, SEEK_END)
+  %ret0 = call i32 @fseek(%FILE* %file, i64 0, i64 2)
+  %io_err0 = icmp ne i32 %ret0, 0
+  br i1 %io_err0, label %io_error, label %get_size
+
+get_size:
+  %size = call i64 @ftell(%FILE* %file)
+  %io_err1 = icmp slt i64 %size, 0
+  br i1 %io_err1, label %io_error, label %check_size
+
+check_size:
+  %fits = icmp sle i64 %size, 4096
+  br i1 %fits, label %read, label %too_big
+
+read:
+  %ret1 = call i64 @fread(i8* %program, i64 4096, i64 1, %FILE* %file)
+  %io_err2 = icmp ne i64 %ret1, 0
+  br i1 %io_err1, label %io_error, label %interpret
+
+interpret:
   %memory = call %memory_t* @alloc_memory()
 
-  call void @left(%memory_t* %memory)
-  call void @left(%memory_t* %memory)
-  call void @read(%memory_t* %memory)
-  call void @right(%memory_t* %memory)
-  call void @read(%memory_t* %memory)
-  call void @right(%memory_t* %memory)
-  call void @read(%memory_t* %memory)
-  call void @print(%memory_t* %memory)
-  call void @left(%memory_t* %memory)
-  call void @print(%memory_t* %memory)
-  call void @left(%memory_t* %memory)
-  call void @print(%memory_t* %memory)
-
   ret i32 0
+
+too_big:
+  %too_big_msg_ptr = getelementptr [21 x i8]* @too_big_msg, i8 0, i8 0
+  call void (i8*, ...)* @fatal(i8* %too_big_msg_ptr)
+  unreachable
+io_error:
+  %io_error_msg_ptr = getelementptr [33 x i8]* @io_error_msg, i8 0, i8 0
+  call void (i8*, ...)* @fatal(i8* %io_error_msg_ptr)
+  unreachable
+open_error:
+  %open_error_msg_ptr = getelementptr [27 x i8]* @open_error_msg, i8 0, i8 0
+  call void (i8*, ...)* @fatal(i8* %open_error_msg_ptr, i8* %path)
+  unreachable
+usage:
+  call void @usage(i8** %argv)
+  unreachable
 }
