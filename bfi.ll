@@ -338,12 +338,18 @@ get_size:
 
 check_size:
   %fits = icmp sle i64 %size, 4096
-  br i1 %fits, label %read, label %too_big
+  br i1 %fits, label %seek_back, label %too_big
+
+seek_back:
+  ; fseek(file, 0, SEEK_SET)
+  %ret1 = call i32 @fseek(%FILE* %file, i64 0, i64 0)
+  %io_err2 = icmp ne i32 %ret1, 0
+  br i1 %io_err2, label %io_error, label %read
 
 read:
-  %ret1 = call i64 @fread(i8* %program, i64 4096, i64 1, %FILE* %file)
-  %io_err2 = icmp ne i64 %ret1, 0
-  br i1 %io_err1, label %io_error, label %interpret
+  %ret2 = call i64 @fread(i8* %program, i64 4096, i64 1, %FILE* %file)
+  %io_err3 = icmp ne i64 %ret2, 0
+  br i1 %io_err3, label %io_error, label %interpret
 
 interpret:
   %memory = call %memory_t* @alloc_memory()
