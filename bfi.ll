@@ -19,12 +19,10 @@ target datalayout = "e p:64:64:64"
 @stdout = external global %FILE*
 @stderr = external global %FILE*
 
-declare i32 @printf(i8*, ...)
 declare i32 @vfprintf(%FILE*, i8*, i8*)
 declare i32 @putchar(i32)
 declare void @exit(i32)
 declare i32 @fgetc(%FILE*)
-declare i32 @ungetc(i32, %FILE*)
 
 declare %FILE* @fopen(i8*, i8*)
 declare i32 @fseek(%FILE*, i64, i64)
@@ -40,7 +38,7 @@ define void @fatal(i8* %format, ...) {
   %ap = alloca i8
   call void @llvm.va_start(i8* %ap)
 
-  %stream = load %FILE** @stdout
+  %stream = load %FILE** @stderr
 
   call i32 (%FILE*, i8*, i8*)* @vfprintf(%FILE* %stream, i8* %format, i8* %ap)
 
@@ -301,44 +299,22 @@ define void @usage(i8** %argv) {
   unreachable
 }
 
-define void @interpret(i8* %program, i64 %size) {
-prelude:
-  %memory = call %memory_t* @alloc_memory()
-
-  %loops    = alloca i8, i32 2048
-
-  %head_ptr = alloca i32
-  store i32 0, i32* %head_ptr
-
-  br label %loop
-
-loop:
-  %pos = phi i64 [0, %prelude], [%pos_inc, %next_iter]
-
-  %finish = icmp eq i64 %size, %pos
-  br i1 %finish, label %return, label %do_interpret
-
-do_interpret:
-  %op_ptr = getelementptr i8* %program, i64 %pos
-  %op     = load i8* %op_ptr
-
-  br label %try_right
-
+define void @exec_op(%memory_t* %memory, i8 %op) {
 try_right:
   %right_op = icmp eq i8 %op, 62
   br i1 %right_op, label %do_right, label %try_left
 
 do_right:
   call void @right(%memory_t* %memory)
-  br label %next_iter
+  br label %return
 
 try_left:
   %left_op = icmp eq i8 %op, 60
   br i1 %left_op, label %do_left, label %try_inc
 
 do_left:
-  call void @right(%memory_t* %memory)
-  br label %next_iter
+  call void @left(%memory_t* %memory)
+  br label %return
 
 try_inc:
   %inc_op = icmp eq i8 %op, 43
@@ -346,7 +322,7 @@ try_inc:
 
 do_inc:
   call void @inc(%memory_t* %memory)
-  br label %next_iter
+  br label %return
 
 try_dec:
   %dec_op = icmp eq i8 %op, 45
@@ -354,43 +330,191 @@ try_dec:
 
 do_dec:
   call void @dec(%memory_t* %memory)
-  br label %next_iter
+  br label %return
 
 try_print:
-  ; %msg = getelementptr [33 x i8]* @io_error_msg, i8 0, i8 0
-  ; call i32 (i8*, ...)* @printf(i8* %msg)
-
   %print_op = icmp eq i8 %op, 46
   br i1 %print_op, label %do_print, label %try_read
 
 do_print:
   call void @print(%memory_t* %memory)
-  br label %next_iter
+  br label %return
 
 try_read:
   %read_op  = icmp eq i8 %op, 44
-  br i1 %read_op, label %do_read, label %try_loop_start
+  br i1 %read_op, label %do_read, label %return
 
 do_read:
   call void @read(%memory_t* %memory)
-  br label %next_iter
+  ret void
+
+return:
+  ret void
+}
+
+@no_matching_msg =
+  internal constant [30 x i8] c"Unable to find matching ']'.\0A\00"
+
+define i64 @skip_to_loop_end(i8* %program, i64 %start, i64 %size) {
+prelude:
+  br label %loop
+
+loop:
+  %level = phi i32 [0, %prelude], [%next_level, %next_iter]
+  %pos   = phi i64 [%start, %prelude], [%pos_inc, %next_iter]
+
+  %finish = icmp eq i64 %size, %pos
+  br i1 %finish, label %error, label %do_skip
+
+do_skip:
+  %op_ptr = getelementptr i8* %program, i64 %pos
+  %op     = load i8* %op_ptr
+
+  br label %try_loop_start
 
 try_loop_start:
   %loop_start = icmp eq i8 %op, 91
   br i1 %loop_start, label %do_loop_start, label %try_loop_end
 
 do_loop_start:
+  %level_inc = add i32 %level, 1
   br label %next_iter
 
 try_loop_end:
   %loop_end = icmp eq i8 %op, 93
-  br i1 %loop_end, label %do_loop_end, label %next_iter
+  br i1 %loop_end, label %do_loop_end, label %default
 
 do_loop_end:
+  %level_dec = sub i32 %level, 1
+  %zero      = icmp eq i32 %level_dec, 0
+
+  br i1 %zero, label %return, label %next_iter
+
+default:
   br label %next_iter
 
 next_iter:
+  %next_level = phi i32 [%level, %default],
+                        [%level_inc, %do_loop_start], [%level_dec, %do_loop_end]
+
   %pos_inc = add i64 %pos, 1
+
+  br label %loop
+
+return:
+  ret i64 %pos
+
+error:
+  %no_matching = getelementptr [30 x i8]* @no_matching_msg, i8 0, i8 0
+  call void (i8*, ...)* @fatal(i8* %no_matching)
+  unreachable
+}
+
+@unexpected_op_msg =
+  internal constant [47 x i8]
+  c"Got unexpected '%c' operation: position %llu.\0A\00"
+
+define i64 @exec_loop(%memory_t* %memory, i8* %program,
+                      i64 %start, i64 %size) {
+prelude:
+  %start_inc = add i64 %start, 1
+  br label %check
+
+check:
+  %value = call i8 @get(%memory_t* %memory)
+  %zero  = icmp eq i8 %value, 0
+
+  br i1 %zero, label %skip, label %loop
+
+loop:
+  %pos = phi i64 [%start_inc, %check], [%pos_next, %next_iter]
+
+  %finish = icmp eq i64 %size, %pos
+  br i1 %finish, label %error, label %do_exec
+
+do_exec:
+  %op_ptr = getelementptr i8* %program, i64 %pos
+  %op     = load i8* %op_ptr
+
+  br label %try_loop_start
+
+try_loop_start:
+  %loop_start = icmp eq i8 %op, 91
+  br i1 %loop_start, label %do_loop_start, label %try_loop_end
+
+do_loop_start:
+  %end_loop_pos = call i64 @exec_loop(%memory_t* %memory, i8* %program,
+                                      i64 %pos, i64 %size)
+  br label %next_iter
+
+try_loop_end:
+  %loop_end = icmp eq i8 %op, 93
+  br i1 %loop_end, label %do_loop_end, label %default
+
+do_loop_end:
+  br label %check
+
+default:
+  call void @exec_op(%memory_t* %memory, i8 %op)
+  br label %next_iter
+
+next_iter:
+  %current_pos = phi i64 [%pos, %default], [%end_loop_pos, %do_loop_start]
+  %pos_next = add i64 %current_pos, 1
+  br label %loop
+
+error:
+  %no_matching = getelementptr [30 x i8]* @no_matching_msg, i8 0, i8 0
+  call void (i8*, ...)* @fatal(i8* %no_matching)
+  unreachable
+
+skip:
+  %end = call i64 @skip_to_loop_end(i8* %program, i64 %start, i64 %size)
+  ret i64 %end
+}
+
+define void @exec(i8* %program, i64 %size) {
+prelude:
+  %memory = call %memory_t* @alloc_memory()
+  br label %loop
+
+loop:
+  %pos = phi i64 [0, %prelude], [%pos_next, %next_iter]
+
+  %finish = icmp eq i64 %size, %pos
+  br i1 %finish, label %return, label %do_exec
+
+do_exec:
+  %op_ptr = getelementptr i8* %program, i64 %pos
+  %op     = load i8* %op_ptr
+
+  br label %try_loop_start
+
+try_loop_start:
+  %loop_start = icmp eq i8 %op, 91
+  br i1 %loop_start, label %do_loop_start, label %try_loop_end
+
+do_loop_start:
+  %end_loop_pos = call i64 @exec_loop(%memory_t* %memory, i8* %program,
+                                      i64 %pos, i64 %size)
+  br label %next_iter
+
+try_loop_end:
+  %loop_end = icmp eq i8 %op, 93
+  br i1 %loop_end, label %do_loop_end, label %default
+
+do_loop_end:
+  %unexpected = getelementptr [47 x i8]* @unexpected_op_msg, i8 0, i8 0
+  call void (i8*, ...)* @fatal(i8* %unexpected, i8 %op, i64 %pos)
+  unreachable
+
+default:
+  call void @exec_op(%memory_t* %memory, i8 %op)
+  br label %next_iter
+
+next_iter:
+  %current_pos = phi i64 [%pos, %default], [%end_loop_pos, %do_loop_start]
+  %pos_next = add i64 %current_pos, 1
   br label %loop
 
 return:
@@ -443,12 +567,12 @@ seek_back:
   br i1 %io_err2, label %io_error, label %read
 
 read:
-  %ret2 = call i64 @fread(i8* %program, i64 4096, i64 1, %FILE* %file)
-  %io_err3 = icmp ne i64 %ret2, 0
+  %ret2 = call i64 @fread(i8* %program, i64 %size, i64 1, %FILE* %file)
+  %io_err3 = icmp ne i64 %ret2, 1
   br i1 %io_err3, label %io_error, label %interpret
 
 interpret:
-  call void @interpret(i8* %program, i64 %size)
+  call void @exec(i8* %program, i64 %size)
 
   ret i32 0
 
@@ -456,14 +580,17 @@ too_big:
   %too_big_msg_ptr = getelementptr [21 x i8]* @too_big_msg, i8 0, i8 0
   call void (i8*, ...)* @fatal(i8* %too_big_msg_ptr)
   unreachable
+
 io_error:
   %io_error_msg_ptr = getelementptr [33 x i8]* @io_error_msg, i8 0, i8 0
   call void (i8*, ...)* @fatal(i8* %io_error_msg_ptr)
   unreachable
+
 open_error:
   %open_error_msg_ptr = getelementptr [27 x i8]* @open_error_msg, i8 0, i8 0
   call void (i8*, ...)* @fatal(i8* %open_error_msg_ptr, i8* %path)
   unreachable
+
 usage:
   call void @usage(i8** %argv)
   unreachable
