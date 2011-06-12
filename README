@@ -1,0 +1,11 @@
+(Just for fun) Brainfuck language interpreter written in LLVM assembly.
+
+Usage:
+  make
+  ./bfi <brainfuck program file>
+
+Limitations:
+
+  1. Tested only on x86_64 GNU/Linux systems. Unlikely to work on
+  other systems.
+  2. Program size is limited to 4096 bytes.
